@@ -1,0 +1,58 @@
+name: tests
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - "**.md"
+
+  schedule:
+    - cron: '25 08 * * *'
+
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: Enable remote debugging session
+        required: false
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        ddev_version: [stable, HEAD]
+      fail-fast: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # `ddev backupdrill` runs the backupdrill CLI on the host, so the runner
+      # needs what a user's machine needs: Node.js and the Postgres client tools.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install pg_dump and pg_restore
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          pg_dump --version
+
+      - uses: ddev/github-action-add-on-test@v2
+        with:
+          ddev_version: ${{ matrix.ddev_version }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          debug_enabled: ${{ github.event.inputs.debug_enabled }}
+          addon_repository: ${{ env.GITHUB_REPOSITORY }}
+          addon_ref: ${{ env.GITHUB_REF }}
