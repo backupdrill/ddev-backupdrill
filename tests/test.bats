@@ -75,7 +75,9 @@ health_checks() {
 # Ctrl+C sends SIGINT to the whole foreground process group; do the same to a
 # run in its own group and check the bucket container is removed anyway.
 interrupt_check() {
-  perl -e 'setpgrp(0, 0); exec @ARGV' ddev backupdrill >"${TESTDIR}/interrupted.log" 2>&1 3>&- &
+  # A background job of a non-interactive shell starts with SIGINT ignored and
+  # exec keeps that, so put it back to the default before handing over to ddev.
+  perl -e '$SIG{INT} = "DEFAULT"; setpgrp(0, 0); exec @ARGV' ddev backupdrill >"${TESTDIR}/interrupted.log" 2>&1 3>&- &
   local pid=$!
   local bucket=""
   for _ in $(seq 1 120); do
@@ -85,7 +87,29 @@ interrupt_check() {
   done
   [ -n "${bucket}" ]
   kill -INT -- "-${pid}"
-  wait "${pid}" || true
+
+  # Up to 60 seconds to clean up and exit, then it has to be gone
+  for _ in $(seq 1 120); do
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 0.5
+  done
+  run kill -0 "${pid}"
+  assert_failure
+  local status=0
+  wait "${pid}" || status=$?
+  # A run that finished on its own exits 0 and prints "Drill PASSED"
+  [ "${status}" -ne 0 ]
+
+  # ddev can exit on the signal before the command's own cleanup is done,
+  # so wait for the cleanup to report back
+  for _ in $(seq 1 60); do
+    grep -q "Removed the temporary bucket" "${TESTDIR}/interrupted.log" && break
+    sleep 0.5
+  done
+  run cat "${TESTDIR}/interrupted.log"
+  refute_output --partial "Drill PASSED"
+  assert_output --partial "Removed the temporary bucket"
+
   run docker ps -aq --filter "label=com.backupdrill.ddev-project=${PROJNAME}"
   assert_success
   assert_output ""

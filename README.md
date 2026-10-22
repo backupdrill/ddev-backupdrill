@@ -46,7 +46,7 @@ What it does:
 1. Starts an S3-compatible bucket in a container (versitygw), listening on `127.0.0.1` on a random port, with random keys.
 2. Runs `backupdrill backup`, which dumps the project database (the `public` schema) into that bucket along with a manifest: tables, estimated row counts, and the dump's sha256.
 3. Runs `backupdrill drill`, which downloads the dump, checks the sha256, restores it into a fresh `postgres:<major>-alpine` container, and compares what came back against the manifest.
-4. Removes the sandbox and the bucket, whether the drill passed or failed. Ctrl+C is a partial exception, see [Limitations](#limitations).
+4. Removes the temporary bucket, and the sandbox too unless the drill failed and you passed `--keep`. What Ctrl+C leaves behind is under [Limitations](#limitations).
 
 Output from a project with four tables and about 200,000 rows (some progress lines left out):
 
