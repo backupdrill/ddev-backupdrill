@@ -32,6 +32,28 @@ command -v node >/dev/null 2>&1 ||
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' ||
   fail "Node.js 20 or newer is required, this machine has $(node --version)."
 
+# Only two drill flags are passed through. The others (--config, --bucket,
+# --endpoint, --prefix, --ping-url, --record, --snapshot...) could send the CLI
+# to real infrastructure, or report this local result as if it came from
+# production, so they are refused instead of silently overriding ours.
+drill_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep | --check-cmd=*)
+      drill_args+=("$1")
+      shift
+      ;;
+    --check-cmd)
+      [ $# -ge 2 ] || fail "--check-cmd needs a command, for example: --check-cmd ./check-restore.sh"
+      drill_args+=("$1" "$2")
+      shift 2
+      ;;
+    *)
+      fail "unsupported option '$1'. Only --check-cmd <command> and --keep are passed to the drill."
+      ;;
+  esac
+done
+
 # Settings already exported in your shell or a backupdrill.config.json in the
 # project could point the CLI at a real bucket or a real Supabase project.
 # This command must only ever touch the local database and its own temporary
@@ -47,11 +69,17 @@ done
 workdir="$(mktemp -d)"
 s3_container=""
 cleanup() {
+  local status=$?
   if [ -n "${s3_container}" ]; then
-    docker rm -f "${s3_container}" >/dev/null 2>&1 || true
-    echo "Removed the temporary bucket. The snapshot was deleted with it; nothing is kept." >&2
+    if docker rm -f "${s3_container}" >/dev/null 2>&1; then
+      echo "Removed the temporary bucket. The snapshot was deleted with it; nothing is kept." >&2
+    else
+      echo "ddev backupdrill: could not remove the temporary bucket container ${s3_container}; it still holds the snapshot. Remove it with: docker rm -f ${s3_container}" >&2
+      status=1
+    fi
   fi
   rm -rf "${workdir}"
+  exit "${status}"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -102,7 +130,13 @@ export BACKUPDRILL_S3_FORCE_PATH_STYLE="true"
 cd "${DDEV_APPROOT}"
 no_config="${workdir}/no-config.json"
 
+# The drill downloads the dump into the CLI's temp directory. Keeping that
+# inside our workdir means the cleanup above removes it even when the CLI is
+# interrupted before it can delete it itself.
+export TMPDIR="${workdir}"
+
 # backup prints its manifest as JSON on stdout; the progress lines on stderr
 # say the same thing in fewer words.
 npx --yes "${CLI_PACKAGE}" backup --config "${no_config}" >/dev/null
-npx --yes "${CLI_PACKAGE}" drill --config "${no_config}" "$@"
+# The ${a[@]+...} form keeps an empty array from tripping `set -u` on bash 3.2 (macOS).
+npx --yes "${CLI_PACKAGE}" drill --config "${no_config}" ${drill_args[@]+"${drill_args[@]}"}

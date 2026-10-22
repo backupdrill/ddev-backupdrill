@@ -61,6 +61,34 @@ health_checks() {
   run docker ps -aq --filter "label=com.backupdrill.ddev-project=${PROJNAME}"
   assert_success
   assert_output ""
+
+  # Flags that could point the CLI at real storage or monitoring are refused
+  # before anything starts
+  run ddev backupdrill --config "${TESTDIR}/backupdrill.config.json"
+  assert_failure
+  assert_output --partial "unsupported option '--config'"
+  run ddev backupdrill --ping-url=https://hc-ping.invalid/check
+  assert_failure
+  assert_output --partial "unsupported option '--ping-url=https://hc-ping.invalid/check'"
+}
+
+# Ctrl+C sends SIGINT to the whole foreground process group; do the same to a
+# run in its own group and check the bucket container is removed anyway.
+interrupt_check() {
+  perl -e 'setpgrp(0, 0); exec @ARGV' ddev backupdrill >"${TESTDIR}/interrupted.log" 2>&1 3>&- &
+  local pid=$!
+  local bucket=""
+  for _ in $(seq 1 120); do
+    bucket="$(docker ps -q --filter "label=com.backupdrill.ddev-project=${PROJNAME}")"
+    [ -n "${bucket}" ] && break
+    sleep 0.5
+  done
+  [ -n "${bucket}" ]
+  kill -INT -- "-${pid}"
+  wait "${pid}" || true
+  run docker ps -aq --filter "label=com.backupdrill.ddev-project=${PROJNAME}"
+  assert_success
+  assert_output ""
 }
 
 teardown() {
@@ -83,6 +111,7 @@ teardown() {
   run ddev restart -y
   assert_success
   health_checks
+  interrupt_check
 }
 
 @test "refuses a project that isn't on Postgres" {

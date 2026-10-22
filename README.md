@@ -46,7 +46,7 @@ What it does:
 1. Starts an S3-compatible bucket in a container (versitygw), listening on `127.0.0.1` on a random port, with random keys.
 2. Runs `backupdrill backup`, which dumps the project database (the `public` schema) into that bucket along with a manifest: tables, estimated row counts, and the dump's sha256.
 3. Runs `backupdrill drill`, which downloads the dump, checks the sha256, restores it into a fresh `postgres:<major>-alpine` container, and compares what came back against the manifest.
-4. Removes the sandbox and the bucket. This also happens when the drill fails or you press Ctrl+C.
+4. Removes the sandbox and the bucket, whether the drill passed or failed. Ctrl+C is a partial exception, see [Limitations](#limitations).
 
 Output from a project with four tables and about 200,000 rows (some progress lines left out):
 
@@ -72,7 +72,7 @@ The exit code is 0 when the drill passes and non-zero when it doesn't. The full 
 
 ### Drill flags
 
-Anything you put after `ddev backupdrill` is passed to `backupdrill drill`. Two flags are worth knowing:
+Two flags are passed through to `backupdrill drill`:
 
 | Flag | What it does |
 | ---- | ------------ |
@@ -84,6 +84,8 @@ ddev backupdrill --check-cmd ./scripts/check-restore.sh
 ```
 
 The check command runs on your machine from the project root, not in the web container. It connects as the sandbox's superuser, so row-level security doesn't apply. Use it for data checks ("every order has a customer", "this table isn't empty"), not to test RLS policies.
+
+Any other flag is refused. Options like `--config`, `--bucket` or `--ping-url` would point the CLI at real storage or report a local result to your production monitoring, which this command is built never to do.
 
 ### What it reads, and what it ignores
 
@@ -99,7 +101,8 @@ The command only ever talks to the project database and its own temporary bucket
 - Only the `public` schema unless you set `BACKUPDRILL_SCHEMAS`.
 - Nothing is kept. Each run makes a new backup and throws it away.
 - The CLI comes from npm as `backupdrill@2` (the newest 2.x release), and the first run pulls the versitygw and Postgres images, so it needs network access and takes longer.
-- Tested on macOS and Linux. Windows hasn't been tried.
+- Ctrl+C still removes the bucket and the downloaded dump, but if the sandbox is already running it stays up, and a running `--check-cmd` carries on until it finishes. The CLI doesn't clean up after itself when it's interrupted yet. List leftover sandboxes with `docker ps --filter ancestor=postgres:17-alpine` (use your Postgres version) and remove one with `docker rm -fv <id>`.
+- Tested on macOS (Apple Silicon, OrbStack) and on Ubuntu, x86-64 and arm64, in CI. Windows hasn't been tried.
 
 ## Backing up a real database
 
