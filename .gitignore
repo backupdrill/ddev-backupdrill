@@ -1,0 +1,5 @@
+.env
+.env.*
+node_modules/
+.review/
+.DS_Store

@@ -1,0 +1,15 @@
+name: backupdrill
+
+pre_install_actions:
+  - |
+    #ddev-description:Check that the project uses a Postgres database
+    if [ "${DDEV_DATABASE_FAMILY:-}" != "postgres" ]; then
+      echo "ddev-backupdrill only works with a Postgres database (this project uses ${DDEV_DATABASE:-unknown})."
+      echo "Switch with: ddev config --database=postgres:17"
+      exit 1
+    fi
+
+project_files:
+  - commands/host/backupdrill
+
+ddev_version_constraint: '>= v1.24.10'

@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+#ddev-generated
+## Description: Back up the project's Postgres database and restore it into a throwaway Postgres to check the backup works
+## Usage: backupdrill [drill flags]
+## Example: ddev backupdrill\nddev backupdrill --check-cmd ./check-restore.sh\nddev backupdrill --keep
+## DBTypes: postgres
+
+# Runs on the host, not in the web container: the drill starts its restore
+# sandbox with `docker run` and connects to it on the host's 127.0.0.1, so it
+# needs the host's Docker and network.
+
+set -euo pipefail
+
+# backupdrill only writes to S3-compatible storage. A throwaway versitygw
+# container stands in for the bucket; it lives exactly as long as this command.
+CLI_PACKAGE="backupdrill@2"
+S3_IMAGE="versity/versitygw:v1.9.0"
+S3_BUCKET="ddev"
+
+fail() {
+  echo "ddev backupdrill: $*" >&2
+  exit 1
+}
+
+[ "${DDEV_DATABASE_FAMILY:-}" = "postgres" ] ||
+  fail "this project uses ${DDEV_DATABASE:-an unknown database}; backupdrill only handles Postgres."
+[ -n "${DDEV_HOST_DB_PORT:-}" ] ||
+  fail "can't find the database port on this machine. Is the project running? Try 'ddev start'."
+command -v docker >/dev/null 2>&1 || fail "docker is not on your PATH."
+command -v node >/dev/null 2>&1 ||
+  fail "Node.js 20 or newer has to be installed on this machine (the web container's Node can't reach Docker)."
+node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' ||
+  fail "Node.js 20 or newer is required, this machine has $(node --version)."
+
+# Only two drill flags are passed through. The others (--config, --bucket,
+# --endpoint, --prefix, --ping-url, --record, --snapshot...) could send the CLI
+# to real infrastructure, or report this local result as if it came from
+# production, so they are refused instead of silently overriding ours.
+drill_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep | --check-cmd=*)
+      drill_args+=("$1")
+      shift
+      ;;
+    --check-cmd)
+      [ $# -ge 2 ] || fail "--check-cmd needs a command, for example: --check-cmd ./check-restore.sh"
+      drill_args+=("$1" "$2")
+      shift 2
+      ;;
+    *)
+      fail "unsupported option '$1'. Only --check-cmd <command> and --keep are passed to the drill."
+      ;;
+  esac
+done
+
+# Settings already exported in your shell or a backupdrill.config.json in the
+# project could point the CLI at a real bucket or a real Supabase project.
+# This command must only ever touch the local database and its own temporary
+# bucket, so drop them. The pg_dump/pg_restore paths and the schema list are
+# the only ones that are safe and useful to keep.
+for name in $(compgen -e); do
+  case "${name}" in
+    BACKUPDRILL_PG_DUMP | BACKUPDRILL_PG_RESTORE | BACKUPDRILL_SCHEMAS) ;;
+    BACKUPDRILL_* | DATABASE_URL) unset "${name}" ;;
+  esac
+done
+
+workdir="$(mktemp -d)"
+s3_container=""
+cleanup() {
+  local status=$?
+  if [ -n "${s3_container}" ]; then
+    if docker rm -f "${s3_container}" >/dev/null 2>&1; then
+      echo "Removed the temporary bucket. The snapshot was deleted with it; nothing is kept." >&2
+    else
+      echo "ddev backupdrill: could not remove the temporary bucket container ${s3_container}; it still holds the snapshot. Remove it with: docker rm -f ${s3_container}" >&2
+      status=1
+    fi
+  fi
+  rm -rf "${workdir}"
+  exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+random_hex() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+s3_access_key="bd$(random_hex)"
+s3_secret_key="$(random_hex)$(random_hex)"
+
+echo "Starting a temporary S3 bucket (${S3_IMAGE})..." >&2
+# Bound to 127.0.0.1 on a random port; the --sidecar directory keeps object
+# metadata out of extended attributes, which not every Docker storage driver has.
+s3_container="$(docker run -d \
+  --label "com.backupdrill.ddev-project=${DDEV_PROJECT}" \
+  -p 127.0.0.1:0:7070 \
+  -e ROOT_ACCESS_KEY="${s3_access_key}" \
+  -e ROOT_SECRET_KEY="${s3_secret_key}" \
+  --entrypoint sh \
+  "${S3_IMAGE}" \
+  -c "mkdir -p /data/${S3_BUCKET} /meta && exec versitygw posix --sidecar /meta /data")"
+s3_port="$(docker port "${s3_container}" 7070/tcp | head -n1 | sed 's/.*://')"
+s3_endpoint="http://127.0.0.1:${s3_port}"
+
+# Any HTTP answer (even 403 for an unsigned request) means the gateway is up.
+for _ in $(seq 1 30); do
+  if node -e 'fetch(process.argv[1]).then(() => process.exit(0), () => process.exit(1))' "${s3_endpoint}" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+node -e 'fetch(process.argv[1]).then(() => process.exit(0), () => process.exit(1))' "${s3_endpoint}" 2>/dev/null ||
+  fail "the temporary S3 container did not start. Its log: $(docker logs "${s3_container}" 2>&1 | tail -n 5)"
+
+# DDEV's Postgres always uses db/db/db; DDEV_HOST_DB_PORT is where it's
+# published on this machine.
+export BACKUPDRILL_DATABASE_URL="postgresql://db:db@127.0.0.1:${DDEV_HOST_DB_PORT}/db"
+export BACKUPDRILL_PROJECT_NAME="${DDEV_PROJECT}"
+export BACKUPDRILL_S3_ENDPOINT="${s3_endpoint}"
+export BACKUPDRILL_S3_REGION="us-east-1"
+export BACKUPDRILL_S3_BUCKET="${S3_BUCKET}"
+export BACKUPDRILL_S3_ACCESS_KEY_ID="${s3_access_key}"
+export BACKUPDRILL_S3_SECRET_ACCESS_KEY="${s3_secret_key}"
+export BACKUPDRILL_S3_FORCE_PATH_STYLE="true"
+
+# --config points at a file that doesn't exist, so a backupdrill.config.json in
+# the project root is never read. The working directory stays the project root
+# so a relative --check-cmd works.
+cd "${DDEV_APPROOT}"
+no_config="${workdir}/no-config.json"
+
+# The drill downloads the dump into the CLI's temp directory. Keeping that
+# inside our workdir means the cleanup above removes it even when the CLI is
+# interrupted before it can delete it itself.
+export TMPDIR="${workdir}"
+
+# backup prints its manifest as JSON on stdout; the progress lines on stderr
+# say the same thing in fewer words.
+npx --yes "${CLI_PACKAGE}" backup --config "${no_config}" >/dev/null
+# The ${a[@]+...} form keeps an empty array from tripping `set -u` on bash 3.2 (macOS).
+npx --yes "${CLI_PACKAGE}" drill --config "${no_config}" ${drill_args[@]+"${drill_args[@]}"}
