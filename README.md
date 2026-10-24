@@ -100,7 +100,7 @@ The command only ever talks to the project database and its own temporary bucket
 - Database only. Uploaded files in your project are not part of the backup.
 - Only the `public` schema unless you set `BACKUPDRILL_SCHEMAS`.
 - Nothing is kept. Each run makes a new backup and throws it away.
-- The CLI comes from npm as `backupdrill@2` (the newest 2.x release), and the first run pulls the versitygw and Postgres images, so it needs network access and takes longer.
+- The CLI comes from npm as `backupdrill@^2.7.1` (the newest 2.x release, 2.7.1 or later), and the first run pulls the versitygw and Postgres images, so it needs network access and takes longer.
 - Pressing Ctrl+C a second time skips the cleanup and can leave the sandbox running. List leftover sandboxes with `docker ps --filter name=backupdrill-drill-` and remove one with `docker rm -fv <id>`.
 - Tested on macOS (Apple Silicon, OrbStack) and on Ubuntu, x86-64 and arm64, in CI. Windows hasn't been tried.
 
