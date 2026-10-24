@@ -115,8 +115,73 @@ interrupt_check() {
   assert_output ""
 }
 
+# backupdrill 2.7.0 and later clean up after themselves on Ctrl+C. Interrupt once the
+# drill's sandbox is up and check it, the bucket and the CLI's process are all gone.
+sandbox_interrupt_check() {
+  # Other projects on this machine may have their own backupdrill-drill-* sandboxes
+  # (running, or kept with --keep). Only look at the one this run starts.
+  local before
+  before="$(docker ps -aq --no-trunc --filter "name=backupdrill-drill-" | sort)"
+  perl -e '$SIG{INT} = "DEFAULT"; setpgrp(0, 0); exec @ARGV' ddev backupdrill >"${TESTDIR}/sandbox-interrupted.log" 2>&1 3>&- &
+  local pid=$!
+  # Globals, not locals: teardown cleans these up if an assertion below fails
+  INTERRUPTED_PGID="${pid}"
+  local sandbox=""
+  for _ in $(seq 1 600); do
+    sandbox="$(comm -13 <(echo "${before}") <(docker ps -q --no-trunc --filter "name=backupdrill-drill-" | sort) | head -n 1)"
+    [ -n "${sandbox}" ] && break
+    sleep 0.2
+  done
+  INTERRUPTED_SANDBOX="${sandbox}"
+  [ -n "${sandbox}" ]
+  # Signal the whole process group, the way Ctrl+C in a terminal does
+  kill -INT -- "-${pid}"
+
+  # Wait for the whole group, not just ddev: the CLI is in it, and an orphaned CLI
+  # still cleaning up (or stuck) must fail the test
+  for _ in $(seq 1 120); do
+    kill -0 -- "-${pid}" 2>/dev/null || break
+    sleep 0.5
+  done
+  run kill -0 -- "-${pid}"
+  assert_failure
+  local status=0
+  wait "${pid}" || status=$?
+  [ "${status}" -ne 0 ]
+
+  for _ in $(seq 1 60); do
+    grep -q "Removed the temporary bucket" "${TESTDIR}/sandbox-interrupted.log" && break
+    sleep 0.5
+  done
+  run cat "${TESTDIR}/sandbox-interrupted.log"
+  refute_output --partial "Drill PASSED"
+  assert_output --partial "stopping the drill and cleaning up"
+  # npx forwards the SIGINT a second time; backupdrill 2.7.0 took that as a second
+  # Ctrl+C and skipped the cleanup (fixed in 2.7.1)
+  refute_output --partial "again — exiting without finishing the cleanup"
+  assert_output --partial "Removed the temporary bucket"
+
+  run docker ps -aq --no-trunc --filter "id=${sandbox}"
+  assert_success
+  assert_output ""
+  run docker ps -aq --filter "label=com.backupdrill.ddev-project=${PROJNAME}"
+  assert_success
+  assert_output ""
+}
+
 teardown() {
   set -eu -o pipefail
+  # A failed assertion in sandbox_interrupt_check returns before its own checks run, which
+  # can leave the CLI, its sandbox and the temporary bucket behind
+  if [ -n "${INTERRUPTED_PGID:-}" ]; then
+    kill -KILL -- "-${INTERRUPTED_PGID}" 2>/dev/null || true
+  fi
+  if [ -n "${INTERRUPTED_SANDBOX:-}" ]; then
+    docker rm -fv "${INTERRUPTED_SANDBOX}" >/dev/null 2>&1 || true
+  fi
+  for container in $(docker ps -aq --filter "label=com.backupdrill.ddev-project=${PROJNAME}"); do
+    docker rm -fv "${container}" >/dev/null 2>&1 || true
+  done
   ddev delete -Oy "${PROJNAME}" >/dev/null 2>&1
   # Persist TESTDIR if running inside GitHub Actions. Useful for uploading test result artifacts
   # See example at https://github.com/ddev/github-action-add-on-test#preserving-artifacts
@@ -136,6 +201,7 @@ teardown() {
   assert_success
   health_checks
   interrupt_check
+  sandbox_interrupt_check
 }
 
 @test "refuses a project that isn't on Postgres" {

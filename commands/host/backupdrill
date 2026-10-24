@@ -13,7 +13,9 @@ set -euo pipefail
 
 # backupdrill only writes to S3-compatible storage. A throwaway versitygw
 # container stands in for the bucket; it lives exactly as long as this command.
-CLI_PACKAGE="backupdrill@2"
+# ^2.7.1: Ctrl+C has to clean up the sandbox under npx (2.7.0 took npm's forwarded SIGINT
+# for a second Ctrl+C), and a cached older 2.x mustn't satisfy the range.
+CLI_PACKAGE="backupdrill@^2.7.1"
 S3_IMAGE="versity/versitygw:v1.9.0"
 S3_BUCKET="ddev"
 
